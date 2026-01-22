@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 interface ExecutionStats {
   callCount: number;
@@ -8,6 +8,8 @@ interface ExecutionStats {
   avgTime: number;
   status: "cold" | "warming" | "hot" | "optimized";
   optimizationLevel: number;
+  firstTime: number | null;
+  bestTime: number | null;
 }
 
 interface FunctionRecord {
@@ -15,11 +17,51 @@ interface FunctionRecord {
   code: string;
   stats: ExecutionStats;
   history: number[];
+  execute: () => void; // Real function to execute
+  iterations: number; // Number of iterations per execution
 }
 
 const OPTIMIZATION_THRESHOLD = 5;
 const HOT_THRESHOLD = 10;
 const OPTIMIZED_THRESHOLD = 20;
+
+// ============================================
+// REAL FUNCTIONS TO BE JIT-COMPILED
+// ============================================
+
+// Calculate sum of an array - simple loop
+function calculateSum(arr: number[]): number {
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    sum += arr[i];
+  }
+  return sum;
+}
+
+// Recursive Fibonacci - expensive computation
+function fibonacci(n: number): number {
+  if (n <= 1) return n;
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+// Matrix multiplication - medium complexity, shows O(n³) JIT optimization
+function matrixMultiply(size: number): number[][] {
+  const a: number[][] = Array(size).fill(0).map(() => Array(size).fill(0).map(() => Math.random()));
+  const b: number[][] = Array(size).fill(0).map(() => Array(size).fill(0).map(() => Math.random()));
+  const result: number[][] = Array(size).fill(0).map(() => Array(size).fill(0));
+  
+  for (let i = 0; i < size; i++) {
+    for (let j = 0; j < size; j++) {
+      for (let k = 0; k < size; k++) {
+        result[i][j] += a[i][k] * b[k][j];
+      }
+    }
+  }
+  return result;
+}
+
+// Generate test data
+const testArray = Array.from({ length: 10000 }, (_, i) => i);
 
 export default function Home() {
   const [functions, setFunctions] = useState<FunctionRecord[]>([
@@ -32,8 +74,10 @@ export default function Home() {
   }
   return sum;
 }`,
-      stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold", optimizationLevel: 0 },
+      stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold", optimizationLevel: 0, firstTime: null, bestTime: null },
       history: [],
+      execute: () => calculateSum(testArray),
+      iterations: 100,
     },
     {
       name: "fibonacci",
@@ -41,16 +85,24 @@ export default function Home() {
   if (n <= 1) return n;
   return fibonacci(n - 1) + fibonacci(n - 2);
 }`,
-      stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold", optimizationLevel: 0 },
+      stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold", optimizationLevel: 0, firstTime: null, bestTime: null },
       history: [],
+      execute: () => fibonacci(30),
+      iterations: 1,
     },
     {
-      name: "multiply",
-      code: `function multiply(a, b) {
-  return a * b;
+      name: "matrixMultiply",
+      code: `function matrixMultiply(size) {
+  // Create and multiply two NxN matrices
+  const a = Array(size).fill(0).map(() => 
+    Array(size).fill(0).map(() => Math.random())
+  );
+  // ... O(n³) complexity
 }`,
-      stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold", optimizationLevel: 0 },
+      stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold", optimizationLevel: 0, firstTime: null, bestTime: null },
       history: [],
+      execute: () => matrixMultiply(50),
+      iterations: 1,
     },
   ]);
 
@@ -62,45 +114,73 @@ export default function Home() {
     setLogs((prev) => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] ${message}`]);
   }, []);
 
-  const simulateExecution = useCallback(
+  const executeFunction = useCallback(
     (funcIndex: number) => {
       setFunctions((prev) => {
         const updated = [...prev];
         const func = { ...updated[funcIndex] };
         const stats = { ...func.stats };
 
-        // Simulate execution time (decreases as optimization level increases)
-        const baseTime = Math.random() * 100 + 50;
-        const optimizationFactor = 1 - stats.optimizationLevel * 0.15;
-        const executionTime = Math.max(5, baseTime * optimizationFactor);
+        // ============================================
+        // REAL EXECUTION WITH performance.now()
+        // ============================================
+        const start = performance.now();
+        
+        // Execute the function multiple times for more stable measurements
+        for (let i = 0; i < func.iterations; i++) {
+          func.execute();
+        }
+        
+        const executionTime = performance.now() - start;
+
+        // Track first and best times for comparison
+        if (stats.firstTime === null) {
+          stats.firstTime = executionTime;
+          addLog(`📊 ${func.name} first execution: ${executionTime.toFixed(2)}ms`);
+        }
+        if (stats.bestTime === null || executionTime < stats.bestTime) {
+          const improvement = stats.bestTime !== null 
+            ? ((stats.bestTime - executionTime) / stats.bestTime * 100).toFixed(1)
+            : "0";
+          if (stats.bestTime !== null && Number(improvement) > 5) {
+            addLog(`⚡ ${func.name} new best: ${executionTime.toFixed(2)}ms (-${improvement}%)`);
+          }
+          stats.bestTime = executionTime;
+        }
 
         stats.callCount += 1;
         stats.totalTime += executionTime;
         stats.avgTime = stats.totalTime / stats.callCount;
 
-        // Update optimization status based on call count
+        // Calculate real optimization level based on improvement from first execution
+        if (stats.firstTime !== null && stats.firstTime > 0) {
+          const improvementRatio = 1 - (stats.bestTime ?? stats.firstTime) / stats.firstTime;
+          stats.optimizationLevel = Math.min(5, Math.max(0, improvementRatio * 20));
+        }
+
+        // Update optimization status based on call count AND real performance
         if (stats.callCount >= OPTIMIZED_THRESHOLD) {
           if (stats.status !== "optimized") {
-            addLog(`🚀 ${func.name} fully optimized! Native machine code generated.`);
+            const speedup = stats.firstTime && stats.bestTime 
+              ? ((stats.firstTime - stats.bestTime) / stats.firstTime * 100).toFixed(1)
+              : "?";
+            addLog(`🚀 ${func.name} fully optimized! Speedup: ${speedup}%`);
           }
           stats.status = "optimized";
-          stats.optimizationLevel = Math.min(5, stats.optimizationLevel + 0.5);
         } else if (stats.callCount >= HOT_THRESHOLD) {
           if (stats.status !== "hot") {
-            addLog(`🔥 ${func.name} marked as HOT! Aggressive optimizations applied.`);
+            addLog(`🔥 ${func.name} marked as HOT! V8 is aggressively optimizing.`);
           }
           stats.status = "hot";
-          stats.optimizationLevel = Math.min(4, stats.optimizationLevel + 0.3);
         } else if (stats.callCount >= OPTIMIZATION_THRESHOLD) {
           if (stats.status !== "warming") {
-            addLog(`⚡ ${func.name} warming up. Type profiling started.`);
+            addLog(`⚡ ${func.name} warming up. JIT type profiling active.`);
           }
           stats.status = "warming";
-          stats.optimizationLevel = Math.min(2, stats.optimizationLevel + 0.2);
         }
 
         func.stats = stats;
-        func.history = [...func.history.slice(-20), executionTime];
+        func.history = [...func.history.slice(-30), executionTime];
         updated[funcIndex] = func;
         return updated;
       });
@@ -110,24 +190,24 @@ export default function Home() {
 
   const runSimulation = useCallback(async () => {
     setIsRunning(true);
-    addLog("▶️ Starting JIT simulation...");
+    addLog("▶️ Starting REAL JIT measurement...");
 
     for (let i = 0; i < 30; i++) {
       // Random function selection (simulating real workload)
       const funcIndex = Math.floor(Math.random() * functions.length);
-      simulateExecution(funcIndex);
-      await new Promise((r) => setTimeout(r, 150));
+      executeFunction(funcIndex);
+      await new Promise((r) => setTimeout(r, 200)); // Slightly longer delay for visualization
     }
 
-    addLog("✅ Simulation complete!");
+    addLog("✅ Measurement complete! Compare first vs best times.");
     setIsRunning(false);
-  }, [functions.length, simulateExecution, addLog]);
+  }, [functions.length, executeFunction, addLog]);
 
   const resetAll = useCallback(() => {
     setFunctions((prev) =>
       prev.map((f) => ({
         ...f,
-        stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold" as const, optimizationLevel: 0 },
+        stats: { callCount: 0, totalTime: 0, avgTime: 0, status: "cold" as const, optimizationLevel: 0, firstTime: null, bestTime: null },
         history: [],
       }))
     );
@@ -170,11 +250,8 @@ export default function Home() {
             JIT Optimizer Visualizer
           </h1>
           <p className="text-slate-400 text-lg max-w-2xl mx-auto">
-            Watch how Just-In-Time compilation detects hot spots and optimizes code in real-time.
-            Functions transition from <span className="text-slate-300">cold</span> → 
-            <span className="text-yellow-400"> warming</span> → 
-            <span className="text-orange-400"> hot</span> → 
-            <span className="text-green-400"> optimized</span> as they&apos;re called more frequently.
+            <span className="text-green-400 font-semibold">Real execution!</span> Watch V8&apos;s JIT compiler optimize code as you run it.
+            Compare <span className="text-red-400">First Time</span> vs <span className="text-green-400">Best Time</span> to see actual optimization.
           </p>
         </header>
 
@@ -221,7 +298,7 @@ export default function Home() {
               </pre>
 
               {/* Stats */}
-              <div className="grid grid-cols-2 gap-4 mb-4">
+              <div className="grid grid-cols-2 gap-3 mb-4">
                 <div className="bg-slate-900/50 rounded-lg p-3">
                   <div className="text-xs text-slate-500 uppercase">Calls</div>
                   <div className="text-2xl font-bold text-white">{func.stats.callCount}</div>
@@ -230,7 +307,31 @@ export default function Home() {
                   <div className="text-xs text-slate-500 uppercase">Avg Time</div>
                   <div className="text-2xl font-bold text-white">{func.stats.avgTime.toFixed(1)}ms</div>
                 </div>
+                <div className="bg-slate-900/50 rounded-lg p-3">
+                  <div className="text-xs text-slate-500 uppercase">First Time</div>
+                  <div className="text-xl font-bold text-red-400">
+                    {func.stats.firstTime !== null ? `${func.stats.firstTime.toFixed(1)}ms` : "—"}
+                  </div>
+                </div>
+                <div className="bg-slate-900/50 rounded-lg p-3">
+                  <div className="text-xs text-slate-500 uppercase">Best Time</div>
+                  <div className="text-xl font-bold text-green-400">
+                    {func.stats.bestTime !== null ? `${func.stats.bestTime.toFixed(1)}ms` : "—"}
+                  </div>
+                </div>
               </div>
+
+              {/* JIT Speedup Indicator */}
+              {func.stats.firstTime !== null && func.stats.bestTime !== null && (
+                <div className="bg-gradient-to-r from-red-500/20 to-green-500/20 rounded-lg p-3 mb-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs text-slate-400">Real JIT Speedup</span>
+                    <span className="text-lg font-bold text-green-400">
+                      {((1 - func.stats.bestTime / func.stats.firstTime) * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {/* Optimization Progress */}
               <div className="mb-4">
@@ -250,7 +351,7 @@ export default function Home() {
               <div className="h-16 flex items-end gap-0.5">
                 {func.history.map((time, i) => (
                   <div
-                    key={time}
+                    key={i}
                     className={`flex-1 rounded-t transition-all ${getStatusColor(func.stats.status)}`}
                     style={{ height: `${Math.min(100, time)}%`, opacity: 0.3 + (i / func.history.length) * 0.7 }}
                   />
@@ -265,7 +366,7 @@ export default function Home() {
               {/* Manual Execute Button */}
               <button
                 type="button"
-                onClick={() => simulateExecution(index)}
+                onClick={() => executeFunction(index)}
                 disabled={isRunning}
                 className="w-full mt-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-medium transition-all disabled:opacity-50"
               >

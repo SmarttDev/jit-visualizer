@@ -1,4 +1,4 @@
-# JIT Optimizer
+# JIT Optimizer Visualizer
 
 An educational and experimental project to explore and demonstrate Just-In-Time (JIT) optimization concepts.
 
